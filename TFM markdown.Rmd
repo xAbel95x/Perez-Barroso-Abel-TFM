@@ -1,0 +1,784 @@
+---
+title: "Diferencias de sexo en la agresividad del melanoma: Un análisis del transcriptoma."
+author: "Abel Pérez Barroso"
+date: "04-06-2025"
+output: 
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\newpage
+
+# Preprocesamiento de los datos
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Librerías
+
+library(TCGAbiolinks) # Librería para descarga y preprocesado de datos TCGA.
+library(SummarizedExperiment) # Librería para expresión génica junto con metadatos.
+library(tidyr) # Librería para funciones de transformación de datos.
+library(dplyr) # Librería para manipulación de datos.
+library(tibble) # Librería para gestión de data frames.
+library(openxlsx) # Librería para guardar en excel.
+library(GEOquery) # Librería para descarga y preprocesado de datos GEO.
+library(biomaRt) # Librería conversión de genes.
+# Librerías para análisis de datos de células individuales.
+library(DropletUtils)
+library(SingleCellExperiment)
+library(Matrix) # Librería Matrix para trabajar con matrices dispersas.
+library(arrayQualityMetrics) # Librería para control de calidad.
+library(Biobase) # Librería para estructuras base de datos ómicos.
+library(DESeq2) # Librería para análisis de expresión diferencial.
+library(ggplot2) # Librería para visualización de datos.
+library(reshape2) # Librería para data frames y matrices.
+library(clusterProfiler) # Librería para análisis de enriquecimiento funcional.
+library(org.Hs.eg.db) # Librería con anotaciones de genes humanos.
+library(enrichplot) # Librería de enriquecimiento funcional.
+library(pheatmap) # Librería para crear heatmaps.
+library(ReactomePA) # Librería para vías biológicas.
+library(RColorBrewer) # Librería para paletas de colores.
+library(dendextend) # Librería para personalización y visualización de dendrogramas.
+```
+
+## Base de datos TCGA-SKCM
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Descarga y visualización de datos TCGA-SKCM
+
+query <- GDCquery( # Función para seleccionar datos en TCGA.
+  project = "TCGA-SKCM", # Proyecto a obtener.
+  data.category = "Transcriptome Profiling", # Búsqueda de expresión génica.
+  data.type = "Gene Expression Quantification", # Cuantificación de expresión génica.
+  workflow.type = "STAR - Counts", # Conteo en crudo.
+  experimental.strategy = "RNA-Seq")
+# Descarga de query en bloques de 10.
+GDCdownload(query, method = "api", files.per.chunk = 10)
+data_expr <- GDCprepare(query) # Preparación de los datos.
+dim(data_expr) # Dimensión de la matriz de expresión.
+class(data_expr) # Verificar que sea SummarizedExperiment.
+head(colnames(data_expr)) # Observar las primeras columnas.
+head(rownames(data_expr)) # Observar las primeras filas.
+```
+
+```{r}
+# Obtención de datos clínicos
+
+# Lectura de clincial.tsv previamente descargado de la web.
+clinical_data <- read.delim("D:/R/TFM/Datos/clinical.tsv", header = TRUE)
+head(colnames(clinical_data)) # Observar las primeras columnas.
+head(clinical_data$case_submitter_id) # Observar los ID.
+# Obtener el ID del paciente simplificado.
+colnames(data_expr) <- sub("^((TCGA-[A-Z0-9]{2}-[A-Z0-9]{4})).*", "\\1", colnames(data_expr))
+# Verificar que esten los ID correctamente en ambas tablas.
+all(colnames(data_expr) %in% clinical_data$case_submitter_id)
+data_expr_matrix <- assay(data_expr) # Extraer matriz de expresión génica.
+data_expr_matrix <- t(data_expr_matrix) # Transponer la matriz.
+# Convertir nombres de filas en columna de IDs.
+matrix_data_expr <- as.data.frame(data_expr_matrix) %>%
+  rownames_to_column(var = "case_submitter_id")
+# Reemplazar puntos por guiones.
+matrix_data_expr$case_submitter_id <- gsub("\\.", "-", matrix_data_expr$case_submitter_id)
+clinical_data_unico <- clinical_data %>%
+  group_by(case_submitter_id) %>%
+  summarise(across(everything(), first)) # Eliminar muestras repetidas en clinical_data
+# Muestras repetidas residuales (se eliminan en la combinación posterior.)
+setdiff(matrix_data_expr$case_submitter_id, clinical_data_unico$case_submitter_id)
+```
+
+```{r}
+# Combinar todo para tabla final TCGA
+
+# Unir los data frame clinical y matrix.
+TCGA_combinado <- merge(clinical_data_unico, matrix_data_expr, 
+                        by = "case_submitter_id", all.x = TRUE)
+ # Eliminar las columnas que no se necesitan.
+TCGA <- TCGA_combinado[, -c(2, 3, 5:8, 10:13, 15:46, 48:128, 130:197)]
+TCGA[, c(2, 3)] <- TCGA[, c(3, 2)] # Cambiar columna 2 y 3.
+# Renombrar columnas.
+colnames(TCGA)[c(1, 2, 3, 4, 5, 6)] <- c("case_id", "country", "age", "gender",
+                                         "cancer stage", "tissue")
+colnames(TCGA) <- gsub("\\..*", "", colnames(TCGA)) # Acortar el nombre de los genes.
+rownames(TCGA) <- TCGA$case_id # Establecer los identidicadores como nombres en las filas.
+head(colnames(TCGA)) # Observar las primeras columnas.
+head(rownames(TCGA)) # Observar las primeras filas.
+```
+
+```{r}
+# Guardar en excel
+
+write.xlsx(TCGA, file = "TCGA.xlsx", sheetName = "Hoja1", rowNames = FALSE)
+```
+
+## Base de datos GSE94873
+
+```{r eval=FALSE, include=FALSE}
+# Descarga y visualización de datos GEO
+
+# Descarga de la base de datos GSE94873.
+gse <- getGEO("GSE94873", GSEMatrix = TRUE, AnnotGPL = TRUE)
+save(gse, file="gse94873.RData")
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Cargar y visualización de datos GEO
+
+load("gse94873.RData")
+class(gse[[1]]) # Clase ExpressionSet.
+exprs_data <- exprs(gse[[1]]) # Extraer matriz de expresión.
+dim(exprs_data) # Dimensión de la matriz de expresión.
+annotation_data <- fData(gse[[1]]) # Extraer tabla de anotaciones.
+sample_metadata <- pData(gse[[1]]) # Extraer metadatos.
+head(colnames(sample_metadata)) # Observar las primeras columnas.
+```
+
+```{r}
+# Pasar anotaciones a ensembl.
+
+# Cargar el mart de Ensembl para Homo sapiens.
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+# Extraer los nombres de los genes ORF de los datos de anotación.
+orf_genes <- annotation_data$ORF
+# Obtener los identificadores Ensembl correspondientes a los nombres de genes ORF.
+ensembl_orf <- getBM(attributes = c("external_gene_name", "ensembl_gene_id"),
+                 filters = "external_gene_name",
+                 values = orf_genes,
+                 mart = ensembl)
+head(ensembl_orf) # Imprimir los primero resultados obtenidos.
+# Crear un diccionario que mapea nombres de genes ORF a Ensembl.
+orf_a_ensembl <- setNames(ensembl_orf$ensembl_gene_id, ensembl_orf$external_gene_name)
+# Agregar la columna con los Ensembl en los datos de anotación.
+annotation_data$Ensembl_ID <- orf_a_ensembl[annotation_data$ORF]
+exprs_t <- t(exprs_data) # Transponer la matriz de expresión.
+# Crear un diccionario que mapea IDs de anotación a Ensembl.
+id_a_ensembl <- setNames(annotation_data$Ensembl_ID, annotation_data$ID)
+A_colnames <- colnames(exprs_t) # Obtener los nombres de las columnas actuales.
+# Sustituir los nombres de columnas por Ensembl cuando sea posible.
+ensembl_colnames <- ifelse(is.na(id_a_ensembl[A_colnames]), A_colnames, id_a_ensembl[A_colnames])
+colnames(exprs_t) <- ensembl_colnames # Asignar los nuevos nombres de columna.
+```
+
+```{r}
+# Combinar todo para tabla final GSE94873
+
+# Combinar la metadata de las muestras con la matriz de expresión.
+combinado <- cbind(sample_metadata, exprs_t)
+# Filtrar las muestras eliminando las "Whole Blood, 30 days Post tremelimumab treatment".
+combinado <- combinado[combinado$source_name_ch1!= "Whole Blood, 30 days Post tremelimumab treatment", ]
+# Seleccionar solo algunas columnas del dataset combinado.
+GSE94873 <- combinado[, -c(1, 3:36, 38, 39, 43, 44, 46)]
+sum(duplicated(GSE94873$geo_accession)) # Contar el número de ID GEO duplicadas.
+GSE94873[, c(4, 5)] <- GSE94873[, c(5, 4)] # Intercambiar las columnas 4 y 5.
+# Renombrar algunas columnas.
+colnames(GSE94873)[c(1, 2, 3, 4, 5, 6)] <- c("case_id","country", "age", 
+                                             "gender", "cancer stage", "tissue")
+# Reemplazar identificadores de columnas específicas por sus correspondientes de Ensembl.
+colnames(GSE94873)[colnames(GSE94873) == "A128"] <- "ENSG00000119383"
+colnames(GSE94873)[colnames(GSE94873) == "A162"] <- "ENSG00000162894"
+# Eliminar columnas específicas del dataset.
+GSE94873 <- GSE94873[, !colnames(GSE94873) %in% c("A42", "A98")]
+head(colnames(GSE94873)) # Observar las primeras columnas.
+head(rownames(GSE94873)) # Observar las primeras filas.
+```
+
+```{r}
+# Guardar en excel
+
+write.xlsx(GSE94873, file = "GSE94873.xlsx", sheetName = "Hoja1", rowNames = FALSE)
+```
+
+## Base de datos GSE225063
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Extracción de GSE225063
+
+tar_file <- "GSE225063_RAW.tar" # Definir el nombre del archivo comprimido.
+dir.create("GSE225063_RAW") # Crear un directorio para extraer los archivos.
+untar(tar_file, exdir = "GSE225063_RAW") # Extraer el contenido del archivo TAR.
+# Listar archivos que contienen "GEX" en su nombre.
+gex_files <- list.files("GSE225063_RAW", pattern = "GEX", full.names = TRUE)
+gex_files <- gex_files[grepl("Baseline", gex_files) & !grepl("Week", gex_files)] # Filtrar los archivos que contienen "Baseline" pero no "Week".
+dir.create("GEX_Baseline_Files") # Crear un directorio para almacenar los archivos filtrados.
+file.copy(gex_files, "GEX_Baseline_Files", overwrite = TRUE) # Copiar los archivos seleccionados al nuevo directorio. 
+gex_files <- list.files("GEX_Baseline_Files", full.names = TRUE) # Listar los archivos en el nuevo directorio.
+pbmc_gex_files <- gex_files[grepl("Baseline_PBMC_GEX|PBMC_Baseline_GEX", gex_files)] # Filtrar archivos específicos que contienen "PBMC_GEX".
+dir.create("GEX_Baseline_PBMC_Extraida") # Crear un directorio para extraer estos archivos.
+# Extraer los archivos de cada paciente en el nuevo directorio.
+for (file in pbmc_gex_files) {
+  untar(file, exdir = "GEX_Baseline_PBMC_Extraida")
+}
+# Eliminar aquellos que tengan TIL
+til_files <- list.files("GEX_Baseline_PBMC_Extraida", pattern = "TIL", full.names = TRUE) 
+unlink(til_files, recursive = TRUE) # Eliminar
+```
+
+```{r message=FALSE, warning=FALSE}
+# Obtención de los datos crudos en R.
+
+# Listar los directorios de los pacientes dentro de la carpeta GEX_Baseline_PBMC_Extraida.
+pbmc_patients <- list.dirs("GEX_Baseline_PBMC_Extraida", full.names = TRUE, recursive = FALSE)
+# Función para obtener la expresión global de un paciente.
+get_global_expression <- function(patient_dir) {
+  barcodes <- read.delim(file.path(patient_dir, "barcodes.tsv.gz"), header = FALSE)
+  features <- read.delim(file.path(patient_dir, "features.tsv.gz"), header = FALSE)
+  counts <- readMM(file.path(patient_dir, "matrix.mtx.gz"))
+  rownames(counts) <- features$V1
+  colnames(counts) <- barcodes$V1
+  dense_counts <- as(counts, "matrix")
+  global_expression <- rowSums(dense_counts)
+  return(global_expression)
+}
+# Aplicar la función a cada paciente para obtener su expresión global.
+global_expression_todos <- lapply(pbmc_patients, get_global_expression)
+# Encontrar los genes comunes entre todos los pacientes.
+genes_comun <- Reduce(intersect, lapply(global_expression_todos, names))
+# Alinear la expresión global de cada paciente a los genes comunes.
+expression_alineada <- lapply(global_expression_todos, function(global_exp) {
+  aligned_exp <- global_exp[genes_comun]
+  aligned_exp[is.na(aligned_exp)] <- NA
+  return(aligned_exp)
+})
+# Combinar los datos de expresión en un solo dataframe.
+global_expression_df <- do.call(cbind, expression_alineada)
+# Asignar los nombres de los pacientes a las columnas.
+colnames(global_expression_df) <- basename(pbmc_patients)
+rownames(global_expression_df) <- genes_comun # Asignar los nombres de genes a las filas.
+global_expression_df <- t(global_expression_df) # Transponer la matriz.
+# Filtrar las filas con al menos una expresión distinta de cero.
+global_expression_df <- global_expression_df[rowSums(global_expression_df, na.rm = TRUE) > 0, ]
+```
+
+```{r}
+# Cargar datos GEO GSE225063
+
+gse <- getGEO("GSE225063", GSEMatrix = TRUE, AnnotGPL = TRUE) # Descargar los datos de GEO.
+gse <- gse[[1]] # Extraer el objeto de expresión.
+class(gse) # Ver la clase del objeto. 
+exprs_data <- exprs(gse) # Obtener la matriz de expresión.
+metadata <- pData(gse) # Obtener los metadatos de las muestras.
+# Verificar si las filas de metadata coinciden con las columnas de la matriz de expresión.
+all(rownames(metadata) == colnames(global_expression_df))
+# Filtrar metadata para incluir solo las muestras presentes en la expresión global.
+metadata_filtrado <- metadata[metadata$title %in% rownames(global_expression_df), , drop = FALSE]
+# Ordenar metadata y la matriz de expresión por título.
+metadata_filtrado <- metadata_filtrado[order(metadata_filtrado$title), ]
+global_expression_df <- global_expression_df[order(rownames(global_expression_df)), ]
+```
+
+```{r}
+# Combinar todo para tabla final GSE225063
+
+# Combinar metadata con la expresión global.
+final_data <- cbind(metadata_filtrado, global_expression_df)
+# Seleccionar solo las columnas relevantes eliminando otras innecesarias.
+GSE225063 <- final_data[, -c(1, 3:9, 10:40, 42:49, 51, 53, 54, 56)]
+# Renombrar algunas columnas clave.
+colnames(GSE225063)[c(1, 2, 3, 4, 5)] <- c("case_id", "country", 
+                                           "gender", "cancer stage", "tissue")
+GSE225063$age <- NA # Agregar una columna de edad con valores vacíos.
+# Reordenar las columnas para que "age" esté en la tercera posición.
+GSE225063 <- GSE225063[, c(1, 2, ncol(GSE225063), 3:(ncol(GSE225063)-1))]
+head(colnames(GSE225063)) # Observar las primeras columnas.
+head(rownames(GSE225063)) # Observar las primeras filas.
+```
+
+```{r}
+# Guardar en excel
+
+write.xlsx(GSE225063, file = "GSE225063.xlsx", sheetName = "Hoja1", rowNames = FALSE)
+```
+
+## Combinación de todas las tablas
+
+```{r}
+# Comprobación de las bases de datos
+
+# Extraer los nombres de las columnas de cada conjunto de datos y almacenar en una lista.
+lista_columnas <- list(
+  GSE94873 = colnames(GSE94873),
+  TCGA = colnames(TCGA),
+  GSE225063 = colnames(GSE225063)
+)
+todas_columnas <- unique(unlist(lista_columnas)) # Obtener las columnas únicas.
+# Data frame comparativo.
+comparacion <- data.frame(
+  columna = todas_columnas,
+  GSE94873 = ifelse(todas_columnas %in% colnames(GSE94873), "X", ""),
+  TCGA = ifelse(todas_columnas %in% colnames(TCGA), "X", ""),
+  GSE225063 = ifelse(todas_columnas %in% colnames(GSE225063), "X", "")
+)
+```
+
+```{r}
+# Guardar en excel
+
+write.xlsx(comparacion, file = "Comparacion base de datos.xlsx", sheetName = "Hoja1", rowNames = FALSE)
+```
+
+```{r}
+# Arreglos finales antes de trabajar
+
+GSE94873$gender <- tolower(GSE94873$gender) # Gender en minúscula.
+GSE94873$country <- gsub("USA", "United States", GSE94873$country) # Cambiar nombre de país.
+GSE225063$country <- gsub("USA", "United States", GSE225063$country) # Cambiar nombre de país.
+# Eliminar muestra con gender unknown.
+GSE225063 <- GSE225063[rownames(GSE225063) != "GSM7038736", ]
+TCGA <- TCGA[rownames(TCGA) != "TCGA-GN-A269", ] # Eliminar muestra con NA.
+GSE94873 <- GSE94873[rowSums(is.na(GSE94873)) == 0, ] # Eliminar muestras con NA.
+GSE225063["GSM7038686", "gender"] <- "female" # Cambiar female_female a female.
+# Pasar gender a factor en los tres datasets.
+TCGA$gender <- as.factor(TCGA$gender)
+GSE94873$gender <- as.factor(GSE94873$gender)
+GSE225063$gender <- as.factor(GSE225063$gender)
+# Crear columna origen en los tres datasets.
+TCGA$origen <- "TCGA"
+GSE94873$origen <- "GSE94873"
+GSE225063$origen <- "GSE225063"
+# Reordenar columnas para que origen esté en la primera posición.
+TCGA <- TCGA[, c("origen", names(TCGA)[names(TCGA) != "origen"])]
+GSE94873 <- GSE94873[, c("origen", names(GSE94873)[names(GSE94873) != "origen"])]
+GSE225063 <- GSE225063[, c("origen", names(GSE225063)[names(GSE225063) != "origen"])]
+colnames(TCGA)[colnames(TCGA) == "gender"] <- "sex" # Cambiar el nombre de la columna gender a sex.
+colnames(GSE94873)[colnames(GSE94873) == "gender"] <- "sex" # Cambiar el nombre de la columna gender a sex.
+colnames(GSE225063)[colnames(GSE225063) == "gender"] <- "sex" # Cambiar el nombre de la columna gender a sex.
+```
+
+```{r echo=TRUE}
+# Creación de la tabla final
+
+# Encontrar las columnas comunes en los tres conjuntos de datos.
+columnas_comunes <- Reduce(intersect, list(colnames(GSE94873), colnames(TCGA), colnames(GSE225063)))
+# Filtrar cada dataset para que solo conserven las columnas comunes.
+GSE94873_clean <- GSE94873[, columnas_comunes]
+TCGA_clean <- TCGA[, columnas_comunes]
+GSE225063_clean <- GSE225063[, columnas_comunes]
+data <- rbind(TCGA_clean, GSE225063_clean, GSE94873_clean) # Unir los tres datasets en uno solo.
+data_genes <- data[, -c(1:7)] # Crear un objeto con solo los datos de expresión génica.
+data_pacientes <- data[, -c(8:ncol(data))] # Crear un objeto con solo los datos de los pacientes.
+```
+
+# Exploración de los datos
+
+```{r}
+# Crear carpeta gráficos
+
+if(!dir.exists("Graficos")) {
+  dir.create("Graficos")
+}
+```
+
+```{r}
+# Exploración de los datos
+
+dim(data) # Ver las dimensiones
+str(data) # Ver las variables
+summary(data) # Resumen
+head(data) # Mostrar primeras filas
+colSums(is.na(data)) # Valores NA por columna
+sum(duplicated(data)) # Mirar si hay filas duplicadas
+```
+
+```{r}
+data_pacientes$age <- as.numeric(data_pacientes$age) # Pasar variable age a númerica
+png("Graficos/histograma_edades.png", width = 800, height = 600)
+# Crear histograma sin dibujarlo para obtener los datos
+hist_edad <- hist(data_pacientes$age,
+          breaks = 20,     # Número de divisiones
+          plot = FALSE)
+colores <- brewer.pal(9, "Blues") # Colores
+plot(hist_edad,
+     col = colores,
+     border = "black",
+     main = "Distribución de Edad de los Pacientes", # Título gráfico
+     xlab = "Edad (años)", # Etiqueta eje X
+     ylab = "Número de Pacientes") # Etiqueta eje Y
+text(x = hist_edad$mids, # Eje X cada barra         
+     y = hist_edad$counts/2, # Eje Y medio cada barra   
+     labels = hist_edad$counts, # Conteo de pacientes 
+     cex = 0.8) # Tamaño del texto
+dev.off()
+```
+
+```{r}
+png("Graficos/barplot_sexos.png", width = 800, height = 600)
+counteo_sex <- table(data_pacientes$sex) # Tabla de frecuencias variable sexo
+# Dibujar el barplot y guardar las posiciones de las barras
+bp_sex <- barplot(counteo_sex,
+              col = c("salmon", "lightblue"), # Colores de las barras
+              main = "Distribución por Sexo", # Título gráfico
+              xlab = "Sexo", # Etiqueta eje X
+              ylab = "Número de Pacientes", # Etiqueta eje Y
+              border = "black", # Color bordes barra
+              ylim = c(0, max(counteo_sex) + 5))  # Espacio extra arriba
+
+# Añadir los conteos en medio de las barras
+text(x = bp_sex,                   # Eje X cada barra
+     y = counteo_sex/2,           # Eje Y medio cada barra
+     labels = counteo_sex,          # Conteo de pacientes
+     cex = 1.2)                # Tamaño del texto
+dev.off()
+```
+
+
+# Análisis bioinformático y bioestadístico
+
+```{r}
+columnas_comunes <- Reduce(intersect, list(colnames(TCGA), colnames(GSE225063), colnames(GSE94873)))
+TCGA_clean <- TCGA[, columnas_comunes]
+GSE225063_clean <- GSE225063[, columnas_comunes]
+GSE94873_clean <- GSE94873[, columnas_comunes]
+data <- rbind(TCGA_clean, GSE225063_clean, GSE94873_clean)
+data_genes <- data[, -c(1:7)] # Crear un objeto con solo los datos de expresión génica.
+data_pacientes <- data[, -c(8:ncol(data))] # Crear un objeto con solo los datos de los pacientes.
+```
+
+## Analisis de calidad Pre_Norm
+
+```{r message=FALSE, warning=FALSE}
+# Crear un ExpressionSet para el control de calidad previo a la normalización.
+eset <- ExpressionSet(assayData = t(data_genes), 
+                           phenoData = new("AnnotatedDataFrame", 
+                                           data = data_pacientes)) # Info clínica.
+arrayQualityMetrics(expressionset = eset, 
+                    outdir = "Reporte_Calidad_Pre_Norm", 
+                    force = TRUE, 
+                    do.logtransform = FALSE)
+```
+
+```{r}
+png("Graficos/PCA_Pre.png", width = 800, height = 600)
+pca_pre <- prcomp(data_genes) # Análisis PCA antes de normalización.
+# Crear un data frame con las dos primeras componentes principales, batch y sexo.
+pca_df_pre <- data.frame(pca_pre$x[, 1:2], origen=data_pacientes$origen, sex=data_pacientes$sex) 
+# Calcular la varianza explicada por cada componente principal.
+var_exp <- pca_pre$sdev^2 / sum(pca_pre$sdev^2)
+percent_var <- round(100 * var_exp[1:2], 2)
+# Grafica PCA.
+ggplot(pca_df_pre, aes(x = PC1, y = PC2, color = origen, shape = sex)) +
+  geom_point(size = 3, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "PCA antes de Normalización",
+    x = paste0("PC1 (", percent_var[1], "%)"),
+    y = paste0("PC2 (", percent_var[2], "%)"))
+dev.off()
+```
+
+```{r}
+png("Graficos/Dendo_Pre.png", width = 800, height = 600)
+# Dendrograma de clustering jerárquico entre muestras.
+dist <- dist(data_genes)
+clust <- hclust(dist)
+dend <- as.dendrogram(clust)
+labels(dend) <- rep("", length(labels(dend)))
+origen_ordenado <- data_pacientes$origen[clust$order]
+colores <- c("GSE225063" = "pink", "GSE94873" = "green", "TCGA" = "blue")
+col_hojas <- colores[as.character(origen_ordenado)]
+dend <- color_branches(dend, col=col_hojas)
+plot(dend, main = "Dendrograma por origen")
+legend("topright", # posición de la leyenda
+       legend = names(colores), # nombres de los orígenes
+       fill = colores,# colores
+       border = NA, # sin borde
+       bty = "n",# sin caja
+       cex = 0.8) 
+dev.off()
+```
+
+```{r message=FALSE, warning=FALSE}
+png("Graficos/Distrib_Pre.png", width = 800, height = 600)
+# Convertir la matriz de expresión a formato largo.
+expr_long <- melt(as.data.frame(data_genes))
+# Añadir etiquetas de muestra.
+expr_long$sample <- rep(rownames(data_genes), times = ncol(data_genes)) 
+# Añadir origen (batch).
+expr_long$origen <- rep(data_pacientes$origen, each = ncol(data_genes))
+# Grafica densidad de expresión para cada batch.
+ggplot(expr_long, aes(x = value, color = origen)) +
+  geom_density() +
+  theme_minimal() +
+  labs(title = "Distribución de expresión antes de Normalización",
+       x = "Expresión",
+       y = "Densidad")
+dev.off()
+```
+
+```{r}
+png("Graficos/Box_Pre.png", width = 800, height = 600)
+agg_expr <- rowMeans(data_genes) # Media de expresión para cada muestra.
+# Crear data frame para boxplot.
+box_df <- data.frame(expr = agg_expr, origen = data_pacientes$origen)
+# Boxplot de expresión media por muestra agrupado por batch.
+ggplot(box_df, aes(x = origen, y = expr, fill = origen)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Boxplot de expresión media por muestra antes de Normalización",
+       y = "Expresión media",
+       x = "Origen")
+dev.off()
+```
+
+## Normalización de los datos
+
+```{r message=FALSE, warning=FALSE}
+data_genes <- t(data_genes) # Transponer data
+data_genes <- round(data_genes) # Redondear data
+dds <- DESeqDataSetFromMatrix( # Crear el objeto DeseqDataSet
+  countData = data_genes,
+  colData = data_pacientes,
+  design = ~sex + origen) # Modelo para diferencia de sexo y origen (batch)
+dds <- dds[rowSums(counts(dds))>10,] # Filtrar genes con muy baja expresión
+dds <- DESeq(dds) # Ejecutar DESeq2 para normalizar.
+# Extraer las cuentas normalizadas para el control de calidad
+calidad_norm <- counts(dds, normalized=TRUE)
+```
+
+## Análisis de calidad Post_Norm
+
+```{r}
+# Crear un ExpressionSet con los datos normalizados para análisis de calidad.
+eset_norm <- ExpressionSet(
+  assayData = calidad_norm,
+  phenoData = new("AnnotatedDataFrame", data = data_pacientes)) # Información clínica.
+arrayQualityMetrics(expressionset = eset_norm, 
+                    outdir = "Reporte_Calidad_Norm", 
+                    force = TRUE, 
+                    do.logtransform = FALSE)
+
+```
+
+```{r}
+png("Graficos/PCA_Norm.png", width = 800, height = 600)
+calidad_norm <- t(calidad_norm)
+pca_post <- prcomp(calidad_norm) # Análisis PCA normalizado.
+# Crear un data frame con las dos primeras componentes principales, batch y sexo.
+pca_df_post <- data.frame(pca_post$x[, 1:2], origen=data_pacientes$origen, sex=data_pacientes$sex) 
+# Calcular la varianza explicada por cada componente principal.
+var_exp <- pca_post$sdev^2 / sum(pca_post$sdev^2)
+percent_var <- round(100 * var_exp[1:2], 2)
+# Grafica PCA.
+ggplot(pca_df_post, aes(x = PC1, y = PC2, color = origen, shape = sex)) +
+  geom_point(size = 3, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "PCA Normalizado",
+    x = paste0("PC1 (", percent_var[1], "%)"),
+    y = paste0("PC2 (", percent_var[2], "%)"))
+dev.off()
+```
+
+```{r}
+png("Graficos/Dendo_Norm.png", width = 800, height = 600)
+# Dendrograma de clustering jerárquico entre muestras.
+dist <- dist(calidad_norm)
+clust <- hclust(dist)
+dend <- as.dendrogram(clust)
+labels(dend) <- rep("", length(labels(dend)))
+origen_ordenado <- data_pacientes$origen[clust$order]
+colores <- c("GSE225063" = "pink", "GSE94873" = "green", "TCGA" = "blue")
+col_hojas <- colores[as.character(origen_ordenado)]
+dend <- color_branches(dend, col=col_hojas)
+plot(dend, main = "Dendrograma por origen")
+legend("topright", # posición de la leyenda
+       legend = names(colores), # nombres de los orígenes
+       fill = colores,# colores
+       border = NA, # sin borde
+       bty = "n",# sin caja
+       cex = 0.8) 
+dev.off()
+```
+
+```{r}
+png("Graficos/Box_Norm.png", width = 800, height = 600)
+agg_expr <- rowMeans(calidad_norm) # Media de expresión para cada muestra.
+# Crear data frame para boxplot.
+box_df <- data.frame(expr = agg_expr, origen = data_pacientes$origen)
+# Boxplot de expresión media por muestra agrupado por batch.
+ggplot(box_df, aes(x = origen, y = expr, fill = origen)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Boxplot de expresión media por muestra normalizado",
+       y = "Expresión media",
+       x = "Origen")
+dev.off()
+```
+
+
+## Eliminación de outliers
+
+```{r message=FALSE, warning=FALSE}
+muestras_outliers <- c("TCGA-3N-A9WB","TCGA-BF-A1PU","TCGA-BF-A3DL","TCGA-BF-A9VF",
+                       "TCGA-D3-A3C7","TCGA-D3-A5GO","TCGA-D3-A8GR","TCGA-DA-A1HY",
+                       "TCGA-DA-A1I7","TCGA-DA-A1IA","TCGA-DA-A1IC","TCGA-DA-A3F2",
+                       "TCGA-EB-A3Y7","TCGA-EB-A5KH","TCGA-EB-A5SF","TCGA-EB-A5UN",
+                       "TCGA-EB-A97M","TCGA-EE-A182","TCGA-EE-A2GO","TCGA-EE-A2MI",
+                       "TCGA-ER-A19O","TCGA-FR-A3YO","TCGA-FS-A1ZK","TCGA-GF-A3OT",
+                       "TCGA-GN-A8LL","TCGA-LH-A9QB","TCGA-WE-A8K6","TCGA-YG-AA3P",
+                       "GSM7038639","GSM7038648","GSM7038663","GSM7920540",
+                       "GSM7920545","GSM7920551","GSM7038726")
+# Filtrar dds para eliminar las muestras outliers.
+dds <- dds[, !colnames(dds) %in% muestras_outliers]
+# Filtrar la tabla de metadatos
+data_pacientes <- data_pacientes[!rownames(data_pacientes) %in% muestras_outliers, ]
+res <- results(dds) # Obtener los resultados del análisis de expresión diferencial.
+res <- res[order(res$padj), ] # Ordenar los resultados por valor ajustado de p.
+res_sig <- subset(res, padj < 0.05) # Filtrar los genes significativamente diferenciados.
+```
+
+## Enriquecimiento GO
+
+```{r message=FALSE, warning=FALSE}
+# Obtener los símbolos de los genes significativamente diferenciados.
+gene_symbols <- rownames(res_sig)
+# Mapear ENSEMBL a Entrez usando org.Hs.eg.db.
+entrez_ids <- mapIds(
+  org.Hs.eg.db,
+  keys = gene_symbols,
+  column = "ENTREZID",
+  keytype = "ENSEMBL",
+  multiVals = "first")
+entrez_ids <- na.omit(entrez_ids) # Eliminar genes que no se pudieron mapear.
+# Realizar análisis de enriquecimiento GO para Biological Process (BP).
+ego <- enrichGO(
+  gene = entrez_ids,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  readable = TRUE)
+```
+
+## Gráficos de enriquecimiento
+
+```{r}
+png("Graficos/Barplot.png", width = 800, height = 600)
+# Representar GO enriquecido en un barplot.
+barplot(ego, showCategory = 15, title = "GO enriquecido (BP)", font.size = 12)
+dev.off()
+png("Graficos/Dotplot.png", width = 800, height = 600)
+# Representar GO enriquecido en un dotplot.
+dotplot(ego, showCategory = 15, title = "Dotplot GO (BP)", font.size = 12)
+dev.off()
+png("Graficos/Enrich.png", width = 800, height = 600)
+ # Representar Reactome en un dotplot.
+enrichPathway <- enrichPathway(gene = entrez_ids, organism = "human", pvalueCutoff = 0.05, readable = TRUE)
+dotplot(enrichPathway, showCategory=15, title="Dotplot rutas biológicas", font.size = 11)
+dev.off()
+```
+
+```{r}
+res$log10padj <- -log10(res$padj) # Calcular -log10(padj).
+png("Graficos/Volcano.png", width = 800, height = 600)
+# Crear un Volcano plot.
+ggplot(as.data.frame(res), aes(x = log2FoldChange, y = log10padj)) +
+  geom_point(alpha = 0.4) +
+  theme_minimal() +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+  labs(title = "Volcano plot: diferencias por sexo",
+       x = "Log2 Fold Change",
+       y = "-log10(padj)")
+dev.off()
+# Seleccionar los nombres de los 50 genes más significativos.
+top_genes <- rownames(res_sig)[1:50]
+png("Graficos/Heatmap.png", width = 800, height = 600)
+# Crear un heatmap
+pheatmap(data_genes[top_genes, ], 
+         annotation_col = data_pacientes["sex"], 
+         scale = "row",
+         show_rownames = TRUE,
+         show_colnames = FALSE,
+         fontsize_row = 6,   # tamaño de letra para nombres de genes
+         main = "Top 50 genes más diferenciados por sexo")
+dev.off()
+```
+
+## GO Male
+
+```{r message=FALSE, warning=FALSE}
+# Filtrar genes significativamente sobreexpresados en hombres.
+res_sig_male <- subset(res, padj < 0.05 & log2FoldChange > 0)
+# Obtener los símbolos de los genes seleccionados.
+gene_symbols_male <- rownames(res_sig_male)
+# Mapear ENSEMBL a Entrez para los genes sobreexpresados en hombres.
+entrez_ids_male <- mapIds(
+  org.Hs.eg.db,
+  keys = gene_symbols_male,
+  column = "ENTREZID",
+  keytype = "ENSEMBL",
+  multiVals = "first")
+entrez_ids_male <- na.omit(entrez_ids_male) # Eliminar NA.
+# Análisis GO Biological Process (BP) para genes sobreexpresados en hombres.
+ego_male <- enrichGO(
+  gene = entrez_ids_male,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  readable = TRUE)
+```
+
+## GO Female
+
+```{r message=FALSE, warning=FALSE}
+# Filtrar genes significativamente sobreexpresados en mujeres.
+res_sig_female <- subset(res, padj < 0.05 & log2FoldChange < 0)
+# Obtener los símbolos de los genes seleccionados.
+gene_symbols_female <- rownames(res_sig_female)
+# Análisis GO Biological Process (BP) para genes sobreexpresados en mujeres.
+entrez_ids_female <- mapIds(
+  org.Hs.eg.db,
+  keys = gene_symbols_female,
+  column = "ENTREZID",
+  keytype = "ENSEMBL",
+  multiVals = "first")
+entrez_ids_female <- na.omit(entrez_ids_female) # Eliminar NA.
+# Análisis GO Biological Process (BP) para genes sobreexpresados en mujeres.
+ego_female <- enrichGO(
+  gene = entrez_ids_female,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  readable = TRUE)
+```
+
+## Gráficos
+
+```{r}
+png("Graficos/Barplot_male.png", width = 800, height = 600)
+# Representar GO enriquecido en un barplot.
+barplot(ego_male, showCategory = 15, title = "Barplot GO hombre", font.size = 12)
+dev.off()
+png("Graficos/Dotplot_male.png", width = 800, height = 600)
+# Representar GO enriquecido hombre en un dotplot.
+dotplot(ego_male, showCategory = 15, title = "Dotplot GO hombre", font.size = 12)
+dev.off()
+png("Graficos/Barplot_female.png", width = 800, height = 600)
+# Representar GO enriquecido en un barplot.
+barplot(ego_female, showCategory = 15, title = "Barplot GO mujer", font.size = 12)
+dev.off()
+png("Graficos/Dotplot_female.png", width = 800, height = 600)
+# Representar GO enriquecido mujeres en un dotplot.
+dotplot(ego_female, showCategory = 15, title = "Dotplot GO mujer", font.size = 12)
+dev.off()
+```
+
+```{r}
+enrichPathway_male <- enrichPathway(gene = entrez_ids_male, organism = "human", pvalueCutoff = 0.05, readable = TRUE) # Análisis de enriquecimiento de rutas Reactome hombres.
+enrichPathway_female <- enrichPathway(gene = entrez_ids_female, organism = "human", pvalueCutoff = 0.05, readable = TRUE) # Análisis de enriquecimiento de rutas Reactome mujeres.
+png("Graficos/Enrich_male.png", width = 800, height = 600)
+dotplot(enrichPathway_male, showCategory=15, title="Dotplot rutas biológicas hombres", font.size = 12) # Representar Reactome hombres en un dotplot.
+dev.off()
+png("Graficos/Enrich_female.png", width = 800, height = 600)
+dotplot(enrichPathway_female, showCategory=15, title="Dotplot rutas biológicas mujeres", font.size = 12) # Representar Reactome mujeres en un dotplot.
+dev.off()
+```
